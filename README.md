@@ -354,9 +354,13 @@ The original directory creation, symlinks, batch-script generation, background j
 Consult the documentation for the exact installed release. No complete environment specification or software-version manifest was supplied with the original workflows.
 
 
+
 ## 5. FOREST: Frequency-based tumor classification and out-of-fold predictions
 
 This section adds a standalone R workflow after the sequencing workflows above. It accepts a sample-by-feature CSV, repeats stratified training/validation splits, selects features by their training-only inclusion frequency, and writes validation predictions to the current working directory.
+
+This version runs directly with `train_fraction = 0.67`, `TOP_n = 10L`, `alpha_grid = seq(0.5, 1, by = 0.05)`, and `lambda_ratio_min = 0.001`. No preliminary parameter-screening run or prior analysis object is required. In each outer split, feature frequencies are pooled across alpha/lambda paths fitted on the complete training set. Training CV then selects one final alpha/lambda pair, and the outer validation set evaluates that model.
+
 **FOREST** stands for **F**eature-frequency **O**ut-of-fold **R**esampling with **E**lastic-net **S**election and **T**raining. The name describes the workflow's feature-frequency selection, repeated holdout evaluation, and elastic-net training. Its script filename is `FOREST.R`.
 
 The supplied files are `FOREST.R`, `input.csv`, and this extended `README.md`. The R script includes all modeling and export functions; it does not need `frequency_p.R` or another project script.
@@ -400,9 +404,9 @@ Results are written to `getwd()` by default. Source execution also creates `freq
 
 ### Configure parameters on the current page
 
-Set `n_repeats <- 100L` on the current page before sourcing the script. This is the single repeat setting: it controls both the outer training/validation splits and the inner training subsamples within each split. Its default is 100.
+Set `n_repeats <- 100L` on the current page before sourcing the script. It controls the number of outer training/validation splits. Its default is 100. Feature-frequency estimation uses the complete outer training set for each alpha/lambda path.
 
-For other settings, define `frequency_config` before sourcing the script. Only supplied entries override defaults. An explicit `frequency_config$n_repeats` takes precedence over the page-level `n_repeats`; otherwise the page-level value is used. Each formal run uses one fixed training fraction, TOP_n, alpha, and lambda lower ratio.
+For other settings, define `frequency_config` before sourcing the script. Only supplied entries override defaults. An explicit `frequency_config$n_repeats` takes precedence over the page-level `n_repeats`; otherwise the page-level value is used. Each formal run uses one fixed training fraction, TOP_n, lambda lower ratio, and an explicitly specified alpha grid.
 
 The defaults below are the starting settings for this standalone workflow. Parameters are specified directly on the current page; they are not estimated by a separate parameter-screening stage.
 
@@ -413,9 +417,9 @@ frequency_config <- list(
   output_dir = ".",                # Current working directory
   train_fraction = 0.67,
   TOP_n = 10L,
-  alpha_fixed = 0.5,
+  alpha_grid = seq(0.5, 1, by = 0.05), # 11 alpha values
   lambda_ratio_min = 0.001,
-  n_repeats = n_repeats,            # Shared outer/inner repeat count
+  n_repeats = n_repeats,            # Outer training/validation splits
   n_lambda = 50L,
   pvalue_cutoff = 0.05,
   seed = 123L,
@@ -429,19 +433,18 @@ To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `positive_class` | `"Tumor"` | Positive class for this CSV entry point; probabilities always refer to Tumor |
-| `train_fraction` | 0.67 | Per-class training count is `floor(class_count * train_fraction)`. A train_fraction of 0.67 splits each class approximately 2:1 between the training and validation sets.|
+| `train_fraction` | 0.67 | Per-class training count is `floor(class_count * train_fraction)`. A value of 0.67 splits each class approximately 2:1 between training and validation. |
 | `TOP_n` | 10 | Number of highest positive-frequency features supplied to each final model |
-| `alpha_fixed` | 0.5 | Elastic-net mixing parameter, in (0, 1] |
+| `alpha_grid` | `seq(0.5, 1, by = 0.05)` | 11 elastic-net mixing values used for pooled feature frequencies and final training CV |
 | `lambda_ratio_min` | 0.001 | Lower end of a log-spaced lambda/lambda_max path; upper ratio is 1 |
-| `n_repeats` | 100 | Shared count: 100 outer splits and final model attempts; 100 inner frequency subsamples within each outer split |
+| `n_repeats` | 100 | Number of outer splits and final model attempts |
 | `n_lambda` | 50 | Requested points in each lambda path |
 | `pvalue_cutoff` | 0.05 | Training-only raw p-value threshold; NULL disables this step |
-| `inner_fraction` | 0.8 | Per-class fraction of outer training samples used in inner subsampling |
 | `diff_method` | `"wilcox"` | Two-sided Wilcoxon test; `"welch"` uses Welch's t-test |
 | `cv_nfolds` | 5 | Final training-only CV folds; reduced when a training class is smaller |
 | `plot_iter` | 1 | Split used by the optional ROC plotting function; all repeat details are saved |
 | `fpr_grid` | 101 points from 0 to 1 | Grid used for interpolated ROC curve export |
-| `seed` | 123 | Controls outer splits, coverage repair, inner subsamples, and CV fold assignment |
+| `seed` | 123 | Controls outer splits, coverage repair, and training CV fold assignment |
 | `coef_tol` | 1e-8 | Absolute coefficient threshold for counting feature inclusion |
 | `fit_maxit` | 1000000 | Maximum glmnet iterations |
 | `ensure_oof_coverage` | TRUE | Repair the planned splits so every sample appears in validation |
@@ -450,9 +453,9 @@ To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the
 | `save_models` | TRUE | Save the complete result and models as `frequency_analysis.rds` |
 | `overwrite` | FALSE | Refuse to overwrite existing named outputs |
 
-`frequency_alpha_mode` defaults to `"pooled"`. This entry point takes a single alpha, so the pooled/by-alpha modes yield the same frequency scope.
+The default alpha grid is `0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00`. Feature inclusion counts are pooled over all valid returned alpha/lambda models. The final selected alpha can vary between outer splits. Output tables retain the column `alpha_fixed` for that selected value; it is an output field, while the input configuration uses `alpha_grid`.
 
-With one parameter combination, `n_repeats = 100L` and `n_lambda = 50L` request 100 outer model evaluations. Each outer training set uses 100 inner subsamples, each with a 50-point lambda path: 5,000 requested coefficient models per outer split, or 500,000 over the run. A single glmnet path fit returns multiple lambda models; these counts do not mean 500,000 separate glmnet calls. Frequencies use valid returned models, and AUC summaries use the successful outer final models. Changing `n_repeats` changes both repetition counts, and the planned-coverage feasibility check still applies.
+With the defaults, each outer training set fits 11 alpha paths with 50 lambda points each: 550 requested coefficient models for feature-frequency counting. Across 100 outer repeats, this requests 55,000 frequency models, produced by 1,100 glmnet path fits. Final training CV separately fits the 11 alpha candidates on the selected TOP_n features using the same fold assignment, then retains one model per outer split. AUC summaries therefore use up to 100 final models. Frequencies use the actual valid returned models, and path failures or truncation are recorded.
 
 ### Command-line run and function-only mode
 
@@ -481,7 +484,7 @@ frequency_run <- run_frequency_pipeline(list(
   output_dir = "another_run",
   train_fraction = 0.67,
   TOP_n = 10L,
-  alpha_fixed = 0.5,
+  alpha_grid = seq(0.5, 1, by = 0.05),
   lambda_ratio_min = 0.001,
   n_repeats = 100L,
   n_lambda = 50L,
@@ -498,14 +501,14 @@ This function call returns the complete result invisibly; use `frequency_run$res
 2. With coverage enabled, inspect all planned validation IDs before fitting. If a sample never appears, replace an extra validation occurrence of a same-group sample with the uncovered sample. This preserves each split's per-class counts and the configured number of repeats. The repair uses IDs and planned membership, without consulting expression values or fitted performance; changes are recorded in `split_adjustments.csv`.
 3. In each outer training set, test all original features using the selected differential method and retain raw p-values below the threshold. There is no MAD, missing-rate, or preliminary TOP_n filter. If `pvalue_cutoff = NULL`, skip differential testing/filtering.
 4. Calculate medians, means, and standard deviations from training data. Remove columns that cannot be imputed or have zero/nonfinite SD. Apply the training transformation to validation data.
-5. Generate `n_repeats` stratified subsamples within each outer training set. For each inner subsample, fit the requested alpha/lambda path and count how often each feature has an absolute coefficient greater than `coef_tol`. The frequency denominator uses the actual valid returned models; truncated paths and failures are recorded.
+5. On the complete preprocessed outer training set, fit one lambda path for each value in `alpha_grid`. Count how often each feature has an absolute coefficient greater than `coef_tol`, pooling across all alpha/lambda models. The frequency denominator uses the actual valid returned models; truncated paths and failures are recorded.
 6. Rank by descending inclusion count, break ties by feature name, and select exactly TOP_n positive-frequency features. An insufficient candidate pool is recorded as a failure; TOP_n is not silently reduced.
-7. Fit the final elastic-net logistic model on the outer training set. Choose lambda by the minimum complete, finite training CV deviance; ties prefer larger lambda. Only then predict the outer validation set and calculate AUC.
+7. On the selected TOP_n features, compare every alpha using the same training-only CV fold assignment. Within an alpha, select the minimum complete, finite CV deviance and prefer larger lambda on exact ties. Across alpha values, select the smallest CV deviance and prefer larger alpha on exact ties. The chosen CV object's model is fitted on the complete outer training set. Only after this selection, predict the outer validation set and calculate AUC.
 8. Repeat and export all predictions, coefficients, AUCs, curves, feature frequencies, splits, and diagnostics.
 
 Final regularization may set some of the TOP_n input coefficients to zero. `N_Used` is the input count; `N_Final_Nonzero` is the final nonzero count.
 
-Every class needs at least five samples overall, at least three training samples, at least two validation samples, and at least two samples in an inner subsample. A training fraction of 0.9 therefore needs at least 11 samples per class. For complete planned coverage, each class must also satisfy `n_repeats * validation_count >= class_count`; the script reports the minimum required repeats when this cannot hold.
+Every class needs at least five samples overall, at least three training samples, and at least two validation samples. A training fraction of 0.9 therefore needs at least 11 samples per class. For complete planned coverage, each class must also satisfy `n_repeats * validation_count >= class_count`; the script reports the minimum required repeats when this cannot hold.
 
 ### Saved files
 
@@ -515,19 +518,19 @@ Every class needs at least five samples overall, at least three training samples
 | `oof_predictions_summary.csv` | One row per input sample, in input order: planned validation count, successful prediction count, mean/median/SD/min/max probability, and coverage flag |
 | `results_df.csv` | All successful training and validation sample predictions; `Set` identifies TRN/VAL |
 | `model_df.csv` | Final selected-lambda coefficients for every successful model, including the intercept and zero coefficients; feature coefficients are on the training-standardized scale |
-| `auc_df.csv` | One row per outer attempt: training/validation AUC, selected lambda, feature counts, warnings, and errors |
+| `auc_df.csv` | One row per outer attempt: training/validation AUC, selected alpha and lambda, feature counts, warnings, and errors |
 | `curve_df.csv` | Training and validation FPR/TPR values on `fpr_grid` for each successful model |
 | `indexfilterresult.csv` | AUC mean and 2.5%/97.5% empirical quantiles across successful repeats, plus success/failure counts |
 | `selected_features.csv`, `feature_frequency.csv` | Per-split selected features and training inclusion-frequency rankings |
 | `differential_results.csv` | Training-set differential test results; P is NA when differential testing is disabled |
-| `screen_diagnostics.csv`, `final_diagnostics.csv`, `indexfilter_errors.csv` | Path status, warnings, and failed outer attempts |
+| `screen_diagnostics.csv`, `final_diagnostics.csv`, `indexfilter_errors.csv` | Frequency-path status; per-alpha training CV deviance, selected candidate flag, warnings/errors; failed outer attempts |
 | `split_membership.csv`, `split_adjustments.csv` | Every sample's planned training/validation membership and any coverage-repair swaps |
 | `run_config.R`, `session_info.txt`, `run_log.txt`, `run_status.txt` | Configuration, R/package versions, fitting messages, input checksum, and completion/coverage counts |
 | `frequency_analysis.rds` | Complete result object and saved models, written when `save_models = TRUE` |
 
 ### Interpretation of out-of-fold probabilities
 
-`oof_predictions.csv` contains only **outer validation predictions**. A sample's label and features were excluded from the training, differential analysis, frequency selection, preprocessing estimation, and lambda selection for the model producing that row. Inner-CV `fit.preval` and in-sample training predictions are not used to populate this file.
+`oof_predictions.csv` contains only **outer validation predictions**. A sample's label and features were excluded from the training, differential analysis, frequency selection, preprocessing estimation, and alpha/lambda selection for the model producing that row. Training-CV `fit.preval` and in-sample training predictions are not used to populate this file.
 
 This is repeated holdout validation, rather than a single K-fold partition. A sample can have multiple valid OOF predictions from different models. `Tumor_Probability_Mean` averages only that sample's successful validation predictions. The SD summarizes their spread and is NA when only one valid prediction exists. Do not pool repeated prediction rows as if they were independent subjects.
 
@@ -542,7 +545,7 @@ scores <- read.csv(
 scores[, c("ID", "Group", "N_Validation_Predictions", "Tumor_Probability_Mean")]
 ```
 
-ROC grid interpolation is for curve export. Reported AUCs come from the original predictions using pROC; they are not recalculated from the interpolated grid. The AUC quantile limits summarize repeat variability and are not confidence intervals for a mean. Internal CV is used to select lambda after training-only feature selection; its deviance is not an independent estimate of the entire selection workflow's performance. Freeze formal-run settings beforehand. When settings were selected using the same cohort's validation results, independent data are needed for a final performance estimate.
+ROC grid interpolation is for curve export. Reported AUCs come from the original predictions using pROC; they are not recalculated from the interpolated grid. The AUC quantile limits summarize repeat variability and are not confidence intervals for a mean. Training CV selects alpha and lambda after training-only feature selection; its deviance is not an independent estimate of the entire selection workflow's performance. Freeze formal-run settings beforehand. When settings were selected using the same cohort's validation results, independent data are needed for a final performance estimate.
 
 ### Failures, incomplete coverage, and reruns
 
@@ -569,9 +572,12 @@ The CSV reader requires both groups for the training entry point. For unlabeled 
 
 ### Modeling documentation and validation status
 
-- [glmnet cross-validation documentation](https://search.r-project.org/CRAN/refmans/glmnet/html/cv.glmnet.html)
+- [glmnet cross-validation documentation](https://glmnet.stanford.edu/reference/cv.glmnet.html)
 - [pROC documentation](https://xrobin.github.io/pROC/)
 - [R CSV input documentation](https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html)
+
+The deliverables were checked for input schema, preservation of the original README, script syntax structure, and planned-validation coverage logic. This revision also checks the complete-training-set alpha/lambda frequency scope, requested-model denominator, training-only final selection, and per-holdout selected-alpha mapping into exported tables. The packaging environment did not contain R/Rscript, so end-to-end glmnet fitting was not executed there. The example input is ready for execution in an R environment with the stated dependencies.
+
 
 The deliverables were checked for input schema, preservation of the original README, script syntax structure, and planned-validation coverage logic. This revision also checks that the shared repeat setting reaches the outer loop, inner subsample plan, frequency loop, requested-model denominator, configuration, and entry point. The packaging environment did not contain R/Rscript, so end-to-end glmnet fitting was not executed there. The example input is ready for execution in an R environment with the stated dependencies.
 

@@ -354,11 +354,12 @@ The original directory creation, symlinks, batch-script generation, background j
 Consult the documentation for the exact installed release. No complete environment specification or software-version manifest was supplied with the original workflows.
 
 
-## 5. Frequency-based tumor classification and out-of-fold predictions
+## 5. FOREST: Frequency-based tumor classification and out-of-fold predictions
 
 This section adds a standalone R workflow after the sequencing workflows above. It accepts a sample-by-feature CSV, repeats stratified training/validation splits, selects features by their training-only inclusion frequency, and writes validation predictions to the current working directory.
+**FOREST** stands for **F**eature-frequency **O**ut-of-fold **R**esampling with **E**lastic-net **S**election and **T**raining. The name describes the workflow's feature-frequency selection, repeated holdout evaluation, and elastic-net training. Its script filename is `FOREST.R`.
 
-The supplied files are `frequency_oof_pipeline.R`, `input.csv`, and this extended `README.md`. The R script includes all modeling and export functions; it does not need `frequency_p.R` or another project script.
+The supplied files are `FOREST.R`, `input.csv`, and this extended `README.md`. The R script includes all modeling and export functions; it does not need `frequency_p.R` or another project script.
 
 ### Input format
 
@@ -384,7 +385,9 @@ An R environment is required. Put the script and your `input.csv` in the current
 
 ```r
 getwd()
-source("frequency_oof_pipeline.R", encoding = "UTF-8")
+n_repeats <- 100L
+frequency_config <- list()        # Use the script's fixed defaults
+source("FOREST.R", encoding = "UTF-8")
 ```
 
 The script runs immediately. It checks for `glmnet` and `pROC` and, by default, attempts to install missing packages from CRAN. Package installation needs internet access and a writable R library; Linux source installations may also need the relevant compiler toolchain. To install dependencies explicitly once:
@@ -397,11 +400,14 @@ Results are written to `getwd()` by default. Source execution also creates `freq
 
 ### Configure parameters on the current page
 
-Define `frequency_config` before sourcing the script. Only supplied entries override defaults. Each formal run uses one fixed training fraction, TOP_n, alpha, and lambda lower ratio.
+Set `n_repeats <- 100L` on the current page before sourcing the script. This is the single repeat setting: it controls both the outer training/validation splits and the inner training subsamples within each split. Its default is 100.
 
-The defaults below are runnable example settings from the earlier parameter ranges; they are not a claim that a particular optimal combination has been established.
+For other settings, define `frequency_config` before sourcing the script. Only supplied entries override defaults. An explicit `frequency_config$n_repeats` takes precedence over the page-level `n_repeats`; otherwise the page-level value is used. Each formal run uses one fixed training fraction, TOP_n, alpha, and lambda lower ratio.
+
+The defaults below are the starting settings for this standalone workflow. Parameters are specified directly on the current page; they are not estimated by a separate parameter-screening stage.
 
 ```r
+n_repeats <- 100L
 frequency_config <- list(
   input_file = "input.csv",
   output_dir = ".",                # Current working directory
@@ -409,37 +415,13 @@ frequency_config <- list(
   TOP_n = 10L,
   alpha_fixed = 0.5,
   lambda_ratio_min = 0.001,
-  n_repeats = 100L,                 # Outer training/validation splits
-  n_repeats_screen = 10L,           # Inner training subsamples per split
+  n_repeats = n_repeats,            # Shared outer/inner repeat count
   n_lambda = 50L,
   pvalue_cutoff = 0.05,
   seed = 123L,
   overwrite = FALSE
 )
-source("frequency_oof_pipeline.R", encoding = "UTF-8")
-```
-
-If the earlier screening object `result` is available, transfer the selected row explicitly. The first row is the default in the previous sorted screening table; change `selected_row` if another row has been chosen.
-
-```r
-selected_row <- 1L
-best <- result$indexfilterresult[selected_row, , drop = FALSE]
-stopifnot(nrow(best) == 1L, is.finite(best[["VAL-AUC"]]), best$n_success > 0L)
-
-frequency_config <- list(
-  input_file = "input.csv",
-  output_dir = "formal_run",
-  train_fraction = best$train_fraction,
-  TOP_n = best$TOP_n,
-  alpha_fixed = best$alpha_fixed,
-  lambda_ratio_min = best$lambda_ratio_min,
-  n_repeats = 100L,
-  n_repeats_screen = 10L,
-  n_lambda = 50L,
-  pvalue_cutoff = 0.05,
-  seed = 123L
-)
-source("frequency_oof_pipeline.R", encoding = "UTF-8")
+source("FOREST.R", encoding = "UTF-8")
 ```
 
 To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the configuration **before** the run. NULL is retained as an intentional override. All features then enter the candidate pool, subject only to training-set numerical usability checks.
@@ -447,12 +429,11 @@ To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `positive_class` | `"Tumor"` | Positive class for this CSV entry point; probabilities always refer to Tumor |
-| `train_fraction` | 0.67 | Per-class training count is `floor(class_count * train_fraction)` |
+| `train_fraction` | 0.67 | Per-class training count is `floor(class_count * train_fraction)`. A train_fraction of 0.67 splits each class approximately 2:1 between the training and validation sets.|
 | `TOP_n` | 10 | Number of highest positive-frequency features supplied to each final model |
 | `alpha_fixed` | 0.5 | Elastic-net mixing parameter, in (0, 1] |
 | `lambda_ratio_min` | 0.001 | Lower end of a log-spaced lambda/lambda_max path; upper ratio is 1 |
-| `n_repeats` | 100 | Number of outer splits and final model attempts |
-| `n_repeats_screen` | 10 | Number of stratified inner training subsamples used for frequency estimation |
+| `n_repeats` | 100 | Shared count: 100 outer splits and final model attempts; 100 inner frequency subsamples within each outer split |
 | `n_lambda` | 50 | Requested points in each lambda path |
 | `pvalue_cutoff` | 0.05 | Training-only raw p-value threshold; NULL disables this step |
 | `inner_fraction` | 0.8 | Per-class fraction of outer training samples used in inner subsampling |
@@ -469,21 +450,21 @@ To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the
 | `save_models` | TRUE | Save the complete result and models as `frequency_analysis.rds` |
 | `overwrite` | FALSE | Refuse to overwrite existing named outputs |
 
-`frequency_alpha_mode` defaults to `"pooled"` and retains the earlier pooled/by-alpha functionality. This entry point takes a single alpha, so both modes yield the same frequency scope.
+`frequency_alpha_mode` defaults to `"pooled"`. This entry point takes a single alpha, so the pooled/by-alpha modes yield the same frequency scope.
 
-For a quick preliminary run, set `n_repeats = 10L`. This changes the outer count. `n_repeats_screen` still controls inner frequency estimation, and the coverage feasibility check still applies.
+With one parameter combination, `n_repeats = 100L` and `n_lambda = 50L` request 100 outer model evaluations. Each outer training set uses 100 inner subsamples, each with a 50-point lambda path: 5,000 requested coefficient models per outer split, or 500,000 over the run. A single glmnet path fit returns multiple lambda models; these counts do not mean 500,000 separate glmnet calls. Frequencies use valid returned models, and AUC summaries use the successful outer final models. Changing `n_repeats` changes both repetition counts, and the planned-coverage feasibility check still applies.
 
 ### Command-line run and function-only mode
 
 ```bash
 # Defaults: input.csv, current working directory
-Rscript frequency_oof_pipeline.R
+Rscript FOREST.R
 
 # Specify input and output directory
-Rscript frequency_oof_pipeline.R input.csv formal_run
+Rscript FOREST.R input.csv formal_run
 
 # Show positional argument usage without fitting
-Rscript frequency_oof_pipeline.R --help
+Rscript FOREST.R --help
 ```
 
 The positional arguments override input/output paths. Other settings use the script's `frequency_default_config()` values, which can be edited at the top of the file for command-line use. Running again in the same output directory requires a different directory or an explicit `overwrite = TRUE` setting.
@@ -492,14 +473,20 @@ To load functions without immediately fitting:
 
 ```r
 options(frequency_oof.functions_only = TRUE)
-source("frequency_oof_pipeline.R", encoding = "UTF-8")
+source("FOREST.R", encoding = "UTF-8")
 options(frequency_oof.functions_only = FALSE)
 
 frequency_run <- run_frequency_pipeline(list(
   input_file = "input.csv",
   output_dir = "another_run",
-  train_fraction = 0.75,
-  TOP_n = 15L
+  train_fraction = 0.67,
+  TOP_n = 10L,
+  alpha_fixed = 0.5,
+  lambda_ratio_min = 0.001,
+  n_repeats = 100L,
+  n_lambda = 50L,
+  pvalue_cutoff = 0.05,
+  seed = 123L
 ))
 ```
 
@@ -511,7 +498,7 @@ This function call returns the complete result invisibly; use `frequency_run$res
 2. With coverage enabled, inspect all planned validation IDs before fitting. If a sample never appears, replace an extra validation occurrence of a same-group sample with the uncovered sample. This preserves each split's per-class counts and the configured number of repeats. The repair uses IDs and planned membership, without consulting expression values or fitted performance; changes are recorded in `split_adjustments.csv`.
 3. In each outer training set, test all original features using the selected differential method and retain raw p-values below the threshold. There is no MAD, missing-rate, or preliminary TOP_n filter. If `pvalue_cutoff = NULL`, skip differential testing/filtering.
 4. Calculate medians, means, and standard deviations from training data. Remove columns that cannot be imputed or have zero/nonfinite SD. Apply the training transformation to validation data.
-5. Repeatedly subsample the outer training set. For each inner subsample, fit the requested alpha/lambda path and count how often each feature has an absolute coefficient greater than `coef_tol`. The frequency denominator uses the actual valid returned models; truncated paths and failures are recorded.
+5. Generate `n_repeats` stratified subsamples within each outer training set. For each inner subsample, fit the requested alpha/lambda path and count how often each feature has an absolute coefficient greater than `coef_tol`. The frequency denominator uses the actual valid returned models; truncated paths and failures are recorded.
 6. Rank by descending inclusion count, break ties by feature name, and select exactly TOP_n positive-frequency features. An insufficient candidate pool is recorded as a failure; TOP_n is not silently reduced.
 7. Fit the final elastic-net logistic model on the outer training set. Choose lambda by the minimum complete, finite training CV deviance; ties prefer larger lambda. Only then predict the outer validation set and calculate AUC.
 8. Repeat and export all predictions, coefficients, AUCs, curves, feature frequencies, splits, and diagnostics.
@@ -586,5 +573,5 @@ The CSV reader requires both groups for the training entry point. For unlabeled 
 - [pROC documentation](https://xrobin.github.io/pROC/)
 - [R CSV input documentation](https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html)
 
-The deliverables were checked for input schema, preservation of the original README, script syntax structure, and planned-validation coverage logic. The packaging environment did not contain R/Rscript, so end-to-end glmnet fitting was not executed there. The example input is ready for execution in an R environment with the stated dependencies.
+The deliverables were checked for input schema, preservation of the original README, script syntax structure, and planned-validation coverage logic. This revision also checks that the shared repeat setting reaches the outer loop, inner subsample plan, frequency loop, requested-model denominator, configuration, and entry point. The packaging environment did not contain R/Rscript, so end-to-end glmnet fitting was not executed there. The example input is ready for execution in an R environment with the stated dependencies.
 

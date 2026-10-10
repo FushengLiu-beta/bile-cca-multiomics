@@ -2,7 +2,7 @@
 
 Core command-line workflows for paired-end whole-genome sequencing (WGS), bisulfite sequencing (5mC workflow), 5hmC enrichment sequencing, and RNA-seq. This README consolidates four supplied workflows into reusable examples with English comments and generic filenames.
 
-These are command templates, not software defaults or a fully automated workflow. Replace the input, reference, annotation, and sample identifiers before running. Commands have been reviewed for consistency but have not been executed on sequencing data.
+These are command templates, not software defaults or a fully automated workflow. Replace the input, reference, annotation, and sample identifiers before running. Commands have been reviewed for consistency.
 
 ## Pipeline overview
 

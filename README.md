@@ -352,3 +352,239 @@ The original directory creation, symlinks, batch-script generation, background j
 - [featureCounts](https://subread.sourceforge.net/featureCounts.html)
 
 Consult the documentation for the exact installed release. No complete environment specification or software-version manifest was supplied with the original workflows.
+
+
+## 5. Frequency-based tumor classification and out-of-fold predictions
+
+This section adds a standalone R workflow after the sequencing workflows above. It accepts a sample-by-feature CSV, repeats stratified training/validation splits, selects features by their training-only inclusion frequency, and writes validation predictions to the current working directory.
+
+The supplied files are `frequency_oof_pipeline.R`, `input.csv`, and this extended `README.md`. The R script includes all modeling and export functions; it does not need `frequency_p.R` or another project script.
+
+### Input format
+
+Use a UTF-8, comma-separated file with a header and one row per independent sample.
+
+| Position | Content | Requirements |
+| --- | --- | --- |
+| Column 1 | Sample ID | Unique, nonempty text; leading zeroes are preserved |
+| Column 2 | Sample group | Exactly `Tumor` or `Control`; both groups must be present |
+| Columns 3 onward | Feature expression | At least two numeric feature columns with unique, nonempty names |
+
+The first two headers are internally renamed to `ID` and `Group`; feature names are preserved. Do not include an exported row-index column. Metadata such as age, batch, and sex should not be included among the expression columns unless intentionally treated as model features.
+
+Missing expression values may be empty, `NA`, or `NaN`. The script rejects invalid numeric text, infinite values, empty/duplicate IDs, missing groups, and duplicate headers. It trims surrounding whitespace from IDs and groups. Feature columns cannot be named `ID` or `Group`.
+
+Provide feature values that have already undergone the assay-appropriate processing needed to obtain an expression matrix. This classification script does not process FASTQ/BAM files or perform RNA-seq count normalization. It estimates its imputation and standardization parameters using each training set.
+
+The example `input.csv` contains **80 simulated samples**, 40 in each group, and 30 features. Twenty features have engineered group shifts, nine are noise features, and one is constant; two expression cells are missing. Values use Gaussian noise generated with a fixed Mulberry32 seed of 20261010 and are rounded to six decimal places. This is a format and workflow example; its AUC does not represent biological performance.
+
+### Run in an R session
+
+An R environment is required. Put the script and your `input.csv` in the current working directory, then run:
+
+```r
+getwd()
+source("frequency_oof_pipeline.R", encoding = "UTF-8")
+```
+
+The script runs immediately. It checks for `glmnet` and `pROC` and, by default, attempts to install missing packages from CRAN. Package installation needs internet access and a writable R library; Linux source installations may also need the relevant compiler toolchain. To install dependencies explicitly once:
+
+```r
+install.packages(c("glmnet", "pROC"), repos = "https://cloud.r-project.org")
+```
+
+Results are written to `getwd()` by default. Source execution also creates `frequency_run`, `results_df`, `model_df`, `auc_df`, `curve_df`, `oof_predictions`, `oof_predictions_summary`, and `indexfilterresult` in the sourcing environment.
+
+### Configure parameters on the current page
+
+Define `frequency_config` before sourcing the script. Only supplied entries override defaults. Each formal run uses one fixed training fraction, TOP_n, alpha, and lambda lower ratio.
+
+The defaults below are runnable example settings from the earlier parameter ranges; they are not a claim that a particular optimal combination has been established.
+
+```r
+frequency_config <- list(
+  input_file = "input.csv",
+  output_dir = ".",                # Current working directory
+  train_fraction = 0.67,
+  TOP_n = 10L,
+  alpha_fixed = 0.5,
+  lambda_ratio_min = 0.001,
+  n_repeats = 100L,                 # Outer training/validation splits
+  n_repeats_screen = 10L,           # Inner training subsamples per split
+  n_lambda = 50L,
+  pvalue_cutoff = 0.05,
+  seed = 123L,
+  overwrite = FALSE
+)
+source("frequency_oof_pipeline.R", encoding = "UTF-8")
+```
+
+If the earlier screening object `result` is available, transfer the selected row explicitly. The first row is the default in the previous sorted screening table; change `selected_row` if another row has been chosen.
+
+```r
+selected_row <- 1L
+best <- result$indexfilterresult[selected_row, , drop = FALSE]
+stopifnot(nrow(best) == 1L, is.finite(best[["VAL-AUC"]]), best$n_success > 0L)
+
+frequency_config <- list(
+  input_file = "input.csv",
+  output_dir = "formal_run",
+  train_fraction = best$train_fraction,
+  TOP_n = best$TOP_n,
+  alpha_fixed = best$alpha_fixed,
+  lambda_ratio_min = best$lambda_ratio_min,
+  n_repeats = 100L,
+  n_repeats_screen = 10L,
+  n_lambda = 50L,
+  pvalue_cutoff = 0.05,
+  seed = 123L
+)
+source("frequency_oof_pipeline.R", encoding = "UTF-8")
+```
+
+To disable differential p-value filtering, include `pvalue_cutoff = NULL` in the configuration **before** the run. NULL is retained as an intentional override. All features then enter the candidate pool, subject only to training-set numerical usability checks.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `positive_class` | `"Tumor"` | Positive class for this CSV entry point; probabilities always refer to Tumor |
+| `train_fraction` | 0.67 | Per-class training count is `floor(class_count * train_fraction)` |
+| `TOP_n` | 10 | Number of highest positive-frequency features supplied to each final model |
+| `alpha_fixed` | 0.5 | Elastic-net mixing parameter, in (0, 1] |
+| `lambda_ratio_min` | 0.001 | Lower end of a log-spaced lambda/lambda_max path; upper ratio is 1 |
+| `n_repeats` | 100 | Number of outer splits and final model attempts |
+| `n_repeats_screen` | 10 | Number of stratified inner training subsamples used for frequency estimation |
+| `n_lambda` | 50 | Requested points in each lambda path |
+| `pvalue_cutoff` | 0.05 | Training-only raw p-value threshold; NULL disables this step |
+| `inner_fraction` | 0.8 | Per-class fraction of outer training samples used in inner subsampling |
+| `diff_method` | `"wilcox"` | Two-sided Wilcoxon test; `"welch"` uses Welch's t-test |
+| `cv_nfolds` | 5 | Final training-only CV folds; reduced when a training class is smaller |
+| `plot_iter` | 1 | Split used by the optional ROC plotting function; all repeat details are saved |
+| `fpr_grid` | 101 points from 0 to 1 | Grid used for interpolated ROC curve export |
+| `seed` | 123 | Controls outer splits, coverage repair, inner subsamples, and CV fold assignment |
+| `coef_tol` | 1e-8 | Absolute coefficient threshold for counting feature inclusion |
+| `fit_maxit` | 1000000 | Maximum glmnet iterations |
+| `ensure_oof_coverage` | TRUE | Repair the planned splits so every sample appears in validation |
+| `require_complete_oof` | TRUE | Raise an error after saving diagnostics if any sample has no valid OOF prediction |
+| `install_missing_packages` | TRUE | Attempt to install missing glmnet/pROC packages |
+| `save_models` | TRUE | Save the complete result and models as `frequency_analysis.rds` |
+| `overwrite` | FALSE | Refuse to overwrite existing named outputs |
+
+`frequency_alpha_mode` defaults to `"pooled"` and retains the earlier pooled/by-alpha functionality. This entry point takes a single alpha, so both modes yield the same frequency scope.
+
+For a quick preliminary run, set `n_repeats = 10L`. This changes the outer count. `n_repeats_screen` still controls inner frequency estimation, and the coverage feasibility check still applies.
+
+### Command-line run and function-only mode
+
+```bash
+# Defaults: input.csv, current working directory
+Rscript frequency_oof_pipeline.R
+
+# Specify input and output directory
+Rscript frequency_oof_pipeline.R input.csv formal_run
+
+# Show positional argument usage without fitting
+Rscript frequency_oof_pipeline.R --help
+```
+
+The positional arguments override input/output paths. Other settings use the script's `frequency_default_config()` values, which can be edited at the top of the file for command-line use. Running again in the same output directory requires a different directory or an explicit `overwrite = TRUE` setting.
+
+To load functions without immediately fitting:
+
+```r
+options(frequency_oof.functions_only = TRUE)
+source("frequency_oof_pipeline.R", encoding = "UTF-8")
+options(frequency_oof.functions_only = FALSE)
+
+frequency_run <- run_frequency_pipeline(list(
+  input_file = "input.csv",
+  output_dir = "another_run",
+  train_fraction = 0.75,
+  TOP_n = 15L
+))
+```
+
+This function call returns the complete result invisibly; use `frequency_run$results_df` and the corresponding table fields.
+
+### Modeling procedure
+
+1. Generate `n_repeats` stratified random outer splits using the specified fraction. Each sample belongs to exactly one of training or validation within a split.
+2. With coverage enabled, inspect all planned validation IDs before fitting. If a sample never appears, replace an extra validation occurrence of a same-group sample with the uncovered sample. This preserves each split's per-class counts and the configured number of repeats. The repair uses IDs and planned membership, without consulting expression values or fitted performance; changes are recorded in `split_adjustments.csv`.
+3. In each outer training set, test all original features using the selected differential method and retain raw p-values below the threshold. There is no MAD, missing-rate, or preliminary TOP_n filter. If `pvalue_cutoff = NULL`, skip differential testing/filtering.
+4. Calculate medians, means, and standard deviations from training data. Remove columns that cannot be imputed or have zero/nonfinite SD. Apply the training transformation to validation data.
+5. Repeatedly subsample the outer training set. For each inner subsample, fit the requested alpha/lambda path and count how often each feature has an absolute coefficient greater than `coef_tol`. The frequency denominator uses the actual valid returned models; truncated paths and failures are recorded.
+6. Rank by descending inclusion count, break ties by feature name, and select exactly TOP_n positive-frequency features. An insufficient candidate pool is recorded as a failure; TOP_n is not silently reduced.
+7. Fit the final elastic-net logistic model on the outer training set. Choose lambda by the minimum complete, finite training CV deviance; ties prefer larger lambda. Only then predict the outer validation set and calculate AUC.
+8. Repeat and export all predictions, coefficients, AUCs, curves, feature frequencies, splits, and diagnostics.
+
+Final regularization may set some of the TOP_n input coefficients to zero. `N_Used` is the input count; `N_Final_Nonzero` is the final nonzero count.
+
+Every class needs at least five samples overall, at least three training samples, at least two validation samples, and at least two samples in an inner subsample. A training fraction of 0.9 therefore needs at least 11 samples per class. For complete planned coverage, each class must also satisfy `n_repeats * validation_count >= class_count`; the script reports the minimum required repeats when this cannot hold.
+
+### Saved files
+
+| File | Contents |
+| --- | --- |
+| `oof_predictions.csv` | One row per successful validation prediction, including ID, group, repeat, holdout, parameter fields, and `Tumor_Probability` |
+| `oof_predictions_summary.csv` | One row per input sample, in input order: planned validation count, successful prediction count, mean/median/SD/min/max probability, and coverage flag |
+| `results_df.csv` | All successful training and validation sample predictions; `Set` identifies TRN/VAL |
+| `model_df.csv` | Final selected-lambda coefficients for every successful model, including the intercept and zero coefficients; feature coefficients are on the training-standardized scale |
+| `auc_df.csv` | One row per outer attempt: training/validation AUC, selected lambda, feature counts, warnings, and errors |
+| `curve_df.csv` | Training and validation FPR/TPR values on `fpr_grid` for each successful model |
+| `indexfilterresult.csv` | AUC mean and 2.5%/97.5% empirical quantiles across successful repeats, plus success/failure counts |
+| `selected_features.csv`, `feature_frequency.csv` | Per-split selected features and training inclusion-frequency rankings |
+| `differential_results.csv` | Training-set differential test results; P is NA when differential testing is disabled |
+| `screen_diagnostics.csv`, `final_diagnostics.csv`, `indexfilter_errors.csv` | Path status, warnings, and failed outer attempts |
+| `split_membership.csv`, `split_adjustments.csv` | Every sample's planned training/validation membership and any coverage-repair swaps |
+| `run_config.R`, `session_info.txt`, `run_log.txt`, `run_status.txt` | Configuration, R/package versions, fitting messages, input checksum, and completion/coverage counts |
+| `frequency_analysis.rds` | Complete result object and saved models, written when `save_models = TRUE` |
+
+### Interpretation of out-of-fold probabilities
+
+`oof_predictions.csv` contains only **outer validation predictions**. A sample's label and features were excluded from the training, differential analysis, frequency selection, preprocessing estimation, and lambda selection for the model producing that row. Inner-CV `fit.preval` and in-sample training predictions are not used to populate this file.
+
+This is repeated holdout validation, rather than a single K-fold partition. A sample can have multiple valid OOF predictions from different models. `Tumor_Probability_Mean` averages only that sample's successful validation predictions. The SD summarizes their spread and is NA when only one valid prediction exists. Do not pool repeated prediction rows as if they were independent subjects.
+
+For one probability per sample:
+
+```r
+scores <- read.csv(
+  "oof_predictions_summary.csv",
+  colClasses = c(ID = "character"),
+  check.names = FALSE
+)
+scores[, c("ID", "Group", "N_Validation_Predictions", "Tumor_Probability_Mean")]
+```
+
+ROC grid interpolation is for curve export. Reported AUCs come from the original predictions using pROC; they are not recalculated from the interpolated grid. The AUC quantile limits summarize repeat variability and are not confidence intervals for a mean. Internal CV is used to select lambda after training-only feature selection; its deviance is not an independent estimate of the entire selection workflow's performance. Freeze formal-run settings beforehand. When settings were selected using the same cohort's validation results, independent data are needed for a final performance estimate.
+
+### Failures, incomplete coverage, and reruns
+
+Failed outer attempts remain in `auc_df.csv` and `indexfilter_errors.csv`, with missing AUC and an error message. Their predictions are not generated. Constant/unusable features, too few p-significant or positive-frequency features, numerical path failures, or incompatible sample counts can prevent fitting.
+
+Planned validation coverage does not guarantee successful fitting. If a sample never receives a valid validation prediction, it is retained in the summary with `Has_OOF = FALSE`, count zero, and NA probabilities. The default raises an error **after saving the available tables and diagnostics**; `run_status.txt` records `INCOMPLETE_OOF`. No training probability or artificial zero is used to fill it.
+
+Review the errors, then choose a new output directory and correct the relevant configuration. Options include changing the training fraction, increasing repeats when coverage is inadequate, revisiting TOP_n, or explicitly disabling p-value filtering if that is the intended modeling design. `require_complete_oof = FALSE` allows a partial result to return, with the same missing-value and status records.
+
+A complete OOF status means every sample has at least one successful validation prediction. Some outer attempts can still have failed; check the success/failure counts separately. Keep `overwrite = FALSE` for separate runs, or set TRUE when intentionally replacing all named result files.
+
+Saved models can predict a new feature matrix using the same stored training transformation:
+
+```r
+saved <- readRDS("frequency_analysis.rds")
+model <- saved$analysis$models[[1L]]
+new_samples <- read.csv(
+  "new_samples.csv", colClasses = c(ID = "character"), check.names = FALSE
+)
+tumor_probability <- predict_frequency_model(model, new_samples)
+```
+
+The CSV reader requires both groups for the training entry point. For unlabeled future samples, provide a numeric data frame with the model's named feature columns directly to `predict_frequency_model()`.
+
+### Modeling documentation and validation status
+
+- [glmnet cross-validation documentation](https://search.r-project.org/CRAN/refmans/glmnet/html/cv.glmnet.html)
+- [pROC documentation](https://xrobin.github.io/pROC/)
+- [R CSV input documentation](https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html)
+
+The deliverables were checked for input schema, preservation of the original README, script syntax structure, and planned-validation coverage logic. The packaging environment did not contain R/Rscript, so end-to-end glmnet fitting was not executed there. The example input is ready for execution in an R environment with the stated dependencies.
+
